@@ -112,7 +112,7 @@ class RedisDecoder {
         case `error` => decodeError
         case `bulk` => decodeBulk
         case `array` => decodeArray
-        case _ => throw new IllegalStateException()
+        case x => throw new IllegalStateException(s"Got byte = $x")
       }
     }
 
