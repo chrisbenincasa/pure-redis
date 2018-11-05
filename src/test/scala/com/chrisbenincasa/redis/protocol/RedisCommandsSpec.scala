@@ -1,5 +1,6 @@
 package com.chrisbenincasa.redis.protocol
 
+import cats.effect.IO
 import com.chrisbenincasa.redis.BaseRedisClient
 import com.chrisbenincasa.redis.protocol.ByteBufferImplicits._
 import com.chrisbenincasa.redis.protocol.commands.{Command, EncodedCommandString, Get}
@@ -8,9 +9,9 @@ import java.nio.ByteBuffer
 import java.nio.channels.SocketChannel
 import java.util.concurrent.{ExecutorService, Executors}
 import org.scalatest.FunSuite
+import scala.concurrent.Await
 import scala.concurrent.ExecutionContext.Implicits.global
-import scala.concurrent.duration.Duration
-import scala.concurrent.{Await, Future}
+import scala.concurrent.duration._
 
 class RedisCommandsSpec extends FunSuite {
   private implicit val executor = Executors.newSingleThreadExecutor()
@@ -25,11 +26,16 @@ class RedisCommandsSpec extends FunSuite {
   test("Client") {
     val client = new SocketRedisClient
 
-    val io = client.set("key", "1").flatMap(_ => client.get("key"))
+    val io = for {
+      _ <- client.set("key", "1")
+      k <- client.get("key")
+      k2 <- client.incr("key")
+    } yield k -> k2
 
-    val p = Await.result(io.unsafeToFuture(), Duration.Inf)
+    val (k, k2) = Await.result(io.unsafeToFuture(), 5 seconds)
 
-    println(new String(p.get.array()))
+    assert(new String(k.get.array()) == "1")
+    assert(k2 == 2)
   }
 }
 
@@ -39,23 +45,24 @@ class SocketRedisClient(addr: InetSocketAddress = new InetSocketAddress("localho
   private val channel = SocketChannel.open(addr)
   private val decoder = new RedisDecoder
 
-  override protected def makeRequest(command: Command): Future[RedisResponse] = {
+  override protected def makeRequest(command: Command): IO[RedisResponse] = {
     val encoded = Command.encode(command)
     val wholeBuf = ByteBuffer.allocate(encoded.map(_.length).sum)
     wholeBuf.clear()
     encoded.foreach(wholeBuf.put)
     wholeBuf.flip()
 
-    while (wholeBuf.hasRemaining) {
-      channel.write(wholeBuf)
-    }
+    IO {
+      while (wholeBuf.hasRemaining) {
+        channel.write(wholeBuf)
+      }
+    }.flatMap(_ => {
+      val readBuffer = ByteBuffer.allocate(512)
+      readBuffer.clear()
+      channel.read(readBuffer)
+      readBuffer.flip()
 
-    val readBuffer = ByteBuffer.allocate(512)
-    readBuffer.clear()
-    channel.read(readBuffer)
-    readBuffer.flip()
-
-    val result = decoder.decode.runA(readBuffer).value
-    Future.successful(result)
+      IO.eval(decoder.decode.runA(readBuffer))
+    })
   }
 }
