@@ -32,20 +32,38 @@ class RedisCommandsSpec extends FunSuite {
       k2 <- client.incr("key")
     } yield k -> k2
 
-    val (k, k2) = Await.result(io.unsafeToFuture(), 5 seconds)
+    val (k, k2) = Await.result(io.unsafeToFuture(), Duration.Inf)
 
     assert(new String(k.get.array()) == "1")
     assert(k2 == 2)
   }
+
+  test("Reentrant array") {
+    val client = new SocketRedisClient(readBufferSize = 2)
+
+    val io = for {
+      _ <- client.set("key", "1")
+      _ <- client.set("key2", "2")
+      _ <- client.set("key3", "3")
+      _ <- client.set("key4", "4")
+      all <- client.mGet(Seq("key", "key2", "key3", "key4", "not"))
+    } yield all
+
+    val all = Await.result(io.unsafeToFuture(), Duration.Inf)
+
+    println(all.map(_.map(byteBufferToString)))
+  }
 }
 
-class SocketRedisClient(addr: InetSocketAddress = new InetSocketAddress("localhost", 6379))(implicit E: ExecutorService)
+class SocketRedisClient(
+  addr: InetSocketAddress = new InetSocketAddress("localhost", 6379),
+  readBufferSize: Int = 512
+)(implicit E: ExecutorService)
   extends BaseRedisClient {
 
   private val channel = SocketChannel.open(addr)
-  private val decoder = new RedisDecoder
 
-  override protected def makeRequest(command: Command): IO[RedisResponse] = {
+  override protected def send(command: Command): IO[Unit] = {
     val encoded = Command.encode(command)
     val wholeBuf = ByteBuffer.allocate(encoded.map(_.length).sum)
     wholeBuf.clear()
@@ -56,13 +74,15 @@ class SocketRedisClient(addr: InetSocketAddress = new InetSocketAddress("localho
       while (wholeBuf.hasRemaining) {
         channel.write(wholeBuf)
       }
-    }.flatMap(_ => {
-      val readBuffer = ByteBuffer.allocate(512)
-      readBuffer.clear()
-      channel.read(readBuffer)
-      readBuffer.flip()
+    }
+  }
 
-      IO.eval(decoder.decode.runA(readBuffer))
-    })
+  override protected def read(): IO[ByteBuffer] = {
+    val readBuffer = ByteBuffer.allocate(readBufferSize)
+    for {
+      _ <- IO.pure(readBuffer.clear())
+      _ <- IO(channel.read(readBuffer))
+      _ <- IO.pure(readBuffer.flip())
+    } yield readBuffer
   }
 }

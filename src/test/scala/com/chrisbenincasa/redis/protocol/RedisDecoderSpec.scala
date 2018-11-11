@@ -1,5 +1,6 @@
 package com.chrisbenincasa.redis.protocol
 
+import com.chrisbenincasa.redis.protocol.RedisDecoderValue.RedisResponseValue
 import java.nio.ByteBuffer
 import org.scalacheck.{Arbitrary, Gen}
 import org.scalatest.prop.GeneratorDrivenPropertyChecks
@@ -7,7 +8,7 @@ import org.scalatest.{Assertions, FunSuite}
 import scala.util.Random
 
 class RedisDecoderSpec extends FunSuite with GeneratorDrivenPropertyChecks with Assertions {
-  val decoder = new RedisDecoder
+  val decoder = RedisDecoder
   val r = new Random()
 
   implicit val utf8String: Arbitrary[String] = {
@@ -51,8 +52,8 @@ class RedisDecoderSpec extends FunSuite with GeneratorDrivenPropertyChecks with 
   test("Simple strings") {
     forAll(genStatusReply) { r: StatusResponse =>
       val encoded = r.toString.getBytes()
-      decoder.decode.runA(ByteBuffer.wrap(encoded)).value match {
-        case StatusResponse(msg) => assert(msg === r.message)
+      decoder.decode.runA(RedisDecoderState(ByteBuffer.wrap(encoded))).value match {
+        case RedisResponseValue(StatusResponse(msg)) => assert(msg === r.message)
         case x => fail(s"Expected StatusReply but got $x")
       }
     }
@@ -61,8 +62,8 @@ class RedisDecoderSpec extends FunSuite with GeneratorDrivenPropertyChecks with 
   test("Errors") {
     forAll(genErrorReply) { r: ErrorResponse =>
       val encoded = r.toString.getBytes()
-      decoder.decode.runA(ByteBuffer.wrap(encoded)).value match {
-        case ErrorResponse(msg) => assert(msg === r.message)
+      decoder.decode.runA(RedisDecoderState(ByteBuffer.wrap(encoded))).value match {
+        case RedisResponseValue(ErrorResponse(msg)) => assert(msg === r.message)
         case x => fail(s"Expected ax ErrorReply but got $x")
       }
     }
@@ -70,8 +71,8 @@ class RedisDecoderSpec extends FunSuite with GeneratorDrivenPropertyChecks with 
 
   test("Ints") {
     forAll(genIntegerReply) { l: IntegerResponse => {
-      decoder.decode.runA(ByteBuffer.wrap(l.toString.getBytes())).value match {
-        case IntegerResponse(msg) => assert(msg === l.id)
+      decoder.decode.runA(RedisDecoderState(ByteBuffer.wrap(l.toString.getBytes()))).value match {
+        case RedisResponseValue(IntegerResponse(msg)) => assert(msg === l.id)
         case x => fail(s"Expected a IntegerReply but got $x")
       }
     }}
@@ -79,8 +80,8 @@ class RedisDecoderSpec extends FunSuite with GeneratorDrivenPropertyChecks with 
 
   test("Bulk string") {
     forAll(genBulkReply) { s: BulkResponse =>
-      decoder.decode.runA(ByteBuffer.wrap(s.toString.getBytes)).value match {
-        case BulkResponse(bytes) => assert(new String(bytes) === new String(s.message))
+      decoder.decode.runA(RedisDecoderState(ByteBuffer.wrap(s.toString.getBytes))).value match {
+        case RedisResponseValue(BulkResponse(bytes)) => assert(new String(bytes) === new String(s.message))
         case x => fail(s"Expected a BulkReply but got $x")
       }
     }
@@ -88,9 +89,9 @@ class RedisDecoderSpec extends FunSuite with GeneratorDrivenPropertyChecks with 
 
   test("Arrays") {
     forAll(genMBulkReply(10)) { msg: MBulkResponse =>
-      val res = decoder.decode.runA(ByteBuffer.wrap(msg.toString.getBytes())).value
+      val res = decoder.decode.runA(RedisDecoderState(ByteBuffer.wrap(msg.toString.getBytes()))).value
       res match {
-        case mb @ MBulkResponse(_) => assert(mb === msg)
+        case RedisResponseValue(mb @ MBulkResponse(_)) => assert(mb === msg)
         case x => fail(s"Expected a MBulkReply but got $x")
       }
     }

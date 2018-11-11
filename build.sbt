@@ -5,7 +5,9 @@ lazy val commonSettings = BuildConfig.commonSettings(currentVersion = "1.0")
 
 commonSettings
 
-name := "redis-fun"
+name := "pure-redis"
+
+configs(IntegrationTest)
 
 libraryDependencies ++= Seq(
   "org.typelevel" %% "cats-core" % "1.0.1",

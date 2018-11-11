@@ -6,7 +6,7 @@ object BuildConfig {
     val testDeps = Seq(
       "org.scalatest" %% "scalatest" % versions.scalatest,
       "org.scalacheck" %% "scalacheck" % "1.13.4"
-    ).map(_ % "test")
+    ).map(_ % "test,it")
   }
 
   object Revision {
@@ -25,7 +25,7 @@ object BuildConfig {
 
       credentials += Credentials(Path.userHome / ".sbt" / "credentials"),
 
-      scalaVersion := "2.12.4",
+      scalaVersion := "2.12.7",
 
       crossScalaVersions := Seq("2.11.11", scalaVersion.value),
 

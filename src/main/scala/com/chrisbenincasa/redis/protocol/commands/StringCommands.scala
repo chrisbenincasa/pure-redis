@@ -63,7 +63,7 @@ case class IncrByFloat(key: ByteBuffer, by: Float) extends KeyBasedCommand {
 }
 
 case class MGet(keys: Seq[ByteBuffer]) extends MultiKeyBasedCommand {
-  override def name: ByteBuffer = Command.INCRBYFLOAT
+  override def name: ByteBuffer = Command.MGET
   override def body: Seq[ByteBuffer] = keys
 }
 
