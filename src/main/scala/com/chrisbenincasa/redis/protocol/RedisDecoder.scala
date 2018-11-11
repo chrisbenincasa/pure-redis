@@ -14,7 +14,6 @@ object RedisDecoderValue {
   case class ByteArrayValue(value: Array[Byte]) extends RedisDecoderValue
   case class StringValue(value: String) extends RedisDecoderValue
   case class RedisResponseValue(value: RedisResponse) extends RedisDecoderValue
-  case class RedisMultiResponseValue(value: List[RedisResponse]) extends RedisDecoderValue
 }
 
 case class RedisDecoderState(
@@ -114,7 +113,7 @@ object RedisDecoder {
         }.map(_ => Continue)
       }
 
-    case (_, RedisMultiResponseValue(_) | Continue) =>
+    case (_, Continue) =>
       State.pure(Continue)
 
     case (_, i @ Incomplete(_, last)) =>
@@ -165,7 +164,7 @@ object RedisDecoder {
     } else {
       RedisDecoder.state { st =>
         val newState = st.copy(stack = Accumulation(numResps, Nil, MBulkResponse.apply) +: st.stack)
-        newState -> RedisMultiResponseValue(Nil)
+        newState -> Continue
       }.flatMap(unravelSingle)
     }
   })
