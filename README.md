@@ -1,6 +1,6 @@
 Pure functional Redis
 ===
 
-![Build Statuss](https://travis-ci.org/chrisbenincasa/redis-fun.svg?branch=master)
+![Build Status](https://travis-ci.org/chrisbenincasa/pure-redis.svg?branch=master)
 
-An implementation of the Redis protocol using Cats
+An implementation of the Redis protocol using Cats State monad
