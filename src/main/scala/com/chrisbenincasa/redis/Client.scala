@@ -1,57 +1,62 @@
 package com.chrisbenincasa.redis
 
-import cats.effect.IO
+import cats.effect.{ConcurrentEffect, ContextShift, Effect}
+import cats.syntax.all._
 import com.chrisbenincasa.redis.protocol.ByteBufferImplicits._
-import com.chrisbenincasa.redis.protocol.RedisDecoderValue.{Incomplete, RedisResponseValue}
+import com.chrisbenincasa.redis.protocol.RedisDecoderValue.{Error, Incomplete, RedisResponseValue}
 import com.chrisbenincasa.redis.protocol._
 import com.chrisbenincasa.redis.protocol.commands.Command
 import java.nio.ByteBuffer
-import scala.concurrent.ExecutionContext
 
-abstract class BaseRedisClient
-  extends AbstractRedisClient
-    with StringCommands {}
+abstract class BaseRedisClient[F[_]: ConcurrentEffect](implicit ctx: ContextShift[F], EF: Effect[F])
+  extends AbstractRedisClient[F]
+    with StringCommands[F] {
+    val E: Effect[F] = EF
+  }
 
-abstract class AbstractRedisClient {
-  protected def makeRequest(command: Command): IO[RedisResponse] = {
+abstract class AbstractRedisClient[F[_]: ConcurrentEffect](implicit CS: ContextShift[F], E: Effect[F]) {
+
+  protected val decoder = new RedisDecoder[F]
+
+  protected def makeRequest(command: Command): F[RedisResponse] = {
     for {
       _ <- send(command)
-      res <- readAndParse()
-    } yield res
+      response <- readAndParse()
+    } yield response
   }
 
-  protected def send(command: Command): IO[Unit]
+  protected def send(command: Command): F[Unit]
 
-  protected def read(): IO[ByteBuffer]
+  protected def read(): F[ByteBuffer]
 
-  private def readAndParse(prev: Option[Incomplete] = None): IO[RedisResponse] = {
+  private def readAndParse(prev: Option[Incomplete[F]] = None): F[RedisResponse] = {
     for {
-      buf <- read()
-      concat <- IO(prev.map(_.state).map(_.buffer.concat(buf)).getOrElse(buf))
-      _ <- IO(println("buf " + new String(concat.duplicate().array()).replaceAll("\n", "\\\\n").replaceAll("\r", "\\\\r")))
-      res <- IO.eval {
-        val eval = prev.map(_.last()).getOrElse(RedisDecoder.decode)
-        val state = prev.map(_.state.copy(buffer = concat)).getOrElse(RedisDecoderState(concat))
-        eval.runA(state)
+      readBuf <- read()
+      concatedBuf <- E.delay(prev.map(_.state).map(_.buffer.concat(readBuf)).getOrElse(readBuf))
+      decodingResult <- {
+        val state = prev.map(_.last()).getOrElse(decoder.decode)
+        val initial = prev.map(_.state.copy(buffer = concatedBuf)).getOrElse(RedisDecoderState(concatedBuf))
+        state.run(initial).map(_._2)
       }
-      q <- res match {
-        case i: Incomplete => IO.suspend(readAndParse(Some(i)))
-        case RedisResponseValue(rr) => IO.pure(rr)
-        case x => IO.raiseError(new IllegalStateException(x.toString))
+      redisResponse <- decodingResult match {
+        case i: Incomplete[F] => E.suspend(readAndParse(Some(i)))
+        case RedisResponseValue(rr) => E.pure(rr)
+        case Error(err) => E.raiseError(err)
+        case x => E.raiseError(new IllegalStateException(s"Illegal state reached: $x"))
       }
-    } yield q
+    } yield redisResponse
   }
 
-  protected def safeFork[T](command: Command)(handle: PartialFunction[RedisResponse, IO[T]])(implicit executionContext: ExecutionContext): IO[T] = {
-    IO.shift(executionContext).flatMap(_ => request(command)(handle))
+  protected def safeFork[T](command: Command)(handle: PartialFunction[RedisResponse, F[T]]): F[T] = {
+    CS.shift *> request(command)(handle)
   }
 
   private[redis] def request[T](
     command: Command
-  )(handleResponse: PartialFunction[RedisResponse, IO[T]])(implicit executionContext: ExecutionContext): IO[T] = {
+  )(handleResponse: PartialFunction[RedisResponse, F[T]]): F[T] = {
     makeRequest(command).flatMap(handleResponse orElse {
-      case ErrorResponse(message) => IO.raiseError(new RuntimeException(message))
-      case r => IO.raiseError(new IllegalStateException(r.toString))
+      case ErrorResponse(message) => E.raiseError(new RuntimeException(message))
+      case r => E.raiseError(new IllegalStateException(r.toString))
     })
   }
 }

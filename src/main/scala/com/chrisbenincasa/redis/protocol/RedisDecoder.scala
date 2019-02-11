@@ -1,8 +1,8 @@
 package com.chrisbenincasa.redis.protocol
 
-import cats.data.{State, StateT}
+import cats.data.StateT
+import cats.{Applicative, FlatMap, Functor, Monad}
 import com.chrisbenincasa.redis.protocol.ByteBufferImplicits._
-import com.chrisbenincasa.redis.protocol.RedisDecoder.DecoderState
 import com.chrisbenincasa.redis.protocol.RedisDecoderValue._
 import java.nio.ByteBuffer
 
@@ -10,7 +10,7 @@ sealed trait RedisDecoderValue
 object RedisDecoderValue {
   case class Error(err: Throwable) extends RedisDecoderValue
   case object Continue extends RedisDecoderValue
-  case class Incomplete(state: RedisDecoderState, last: () => DecoderState) extends RedisDecoderValue
+  case class Incomplete[F[_]: Monad : FlatMap](state: RedisDecoderState, last: () => RedisDecoder.DecoderState[F]) extends RedisDecoderValue
   case class ByteArrayValue(value: Array[Byte]) extends RedisDecoderValue
   case class StringValue(value: String) extends RedisDecoderValue
   case class RedisResponseValue(value: RedisResponse) extends RedisDecoderValue
@@ -24,36 +24,50 @@ case class RedisDecoderState(
 case class Accumulation(n: Int, r: List[RedisResponse], lastly: List[RedisResponse] => RedisResponse)
 
 object RedisDecoder {
-  type DecoderState = State[RedisDecoderState, RedisDecoderValue]
+  type DecoderState[F[_]] = StateT[F, RedisDecoderState, RedisDecoderValue]
+}
+
+class RedisDecoder[F[_] : Monad : FlatMap] {
+  import RedisDecoder.DecoderState
+
+  private val AP = Applicative[F]
+  private val F = Functor[F]
 
   private implicit def redisResponseAsValue(r: RedisResponse): RedisResponseValue = RedisResponseValue(r)
 
-  private def state(f: RedisDecoderState => (RedisDecoderState, RedisDecoderValue)): DecoderState = State[RedisDecoderState, RedisDecoderValue](f)
+  private def state(f: RedisDecoderState => F[(RedisDecoderState, RedisDecoderValue)]): DecoderState[F] =
+    StateT[F, RedisDecoderState, RedisDecoderValue](f)
 
-  def readBytes(n: Int)(next: Array[Byte] => DecoderState): DecoderState = {
-    RedisDecoder.state { case st @ RedisDecoderState(buf, _) =>
+  private def pureF[X](x: X): F[X] =
+    F.widen(AP.pure(x))
+
+  private def pureState(x: RedisDecoderValue): DecoderState[F] =
+    StateT.pure(x)
+
+  def readBytes(n: Int)(next: Array[Byte] => DecoderState[F]): DecoderState[F] = {
+    state { case st @ RedisDecoderState(buf, _) =>
       if (buf.remaining() < n) {
-        st -> Incomplete(st, () => readBytes(n)(next))
+        pureF(st -> Incomplete(st, () => readBytes(n)(next)))
       } else {
         val arr = new Array[Byte](n)
         val ret = buf.slice().get(arr, 0, n)
-        st.copy(buffer = ret) -> ByteArrayValue(arr)
+        pureF(st.copy(buffer = ret) -> ByteArrayValue(arr))
       }
     }.flatMap {
       case ByteArrayValue(arr) => next(arr)
-      case x => State.pure(x)
+      case x => StateT.pure(x)
     }
   }
 
-  def readLine(next: String => RedisDecoderValue): DecoderState =
-    readLineS(x => State.pure(next(x)))
+  def readLine(next: String => RedisDecoderValue): DecoderState[F] =
+    readLineS(x => StateT.pure(next(x)))
 
-  def readLineS(next: String => DecoderState): DecoderState = {
-    RedisDecoder.state { case st @ RedisDecoderState(buf, _) =>
+  def readLineS(next: String => DecoderState[F]): DecoderState[F] = {
+    state { case st @ RedisDecoderState(buf, _) =>
       val bytesBeforeNewline = buf.findByteInBuf( '\n', buf.position(), buf.remaining())
 
       if (bytesBeforeNewline == -1) {
-        st -> Incomplete(st, () => readLineS(next))
+        pureF(st -> Incomplete(st, () => readLineS(next)))
       } else {
         val arr = new Array[Byte](bytesBeforeNewline)
         buf.get(arr, 0, bytesBeforeNewline)
@@ -66,105 +80,105 @@ object RedisDecoder {
         }
 
         buf.get()
-        st -> StringValue(line)
+        pureF(st -> StringValue(line))
       }
     }.flatMap {
       case StringValue(x) => next(x)
-      case x => State.pure(x)
+      case x => StateT.pure(x)
     }
   }
 
-  private val decodeStatus: DecoderState =
-    readLine(StatusResponse(_))
+  private val decodeStatus: DecoderState[F] =
+    readLine(StatusResponse.apply)
 
-  private val decodeInteger: DecoderState =
+  private val decodeInteger: DecoderState[F] =
     readLine(s => IntegerResponse(s.toLong))
 
-  private val decodeError: DecoderState =
+  private val decodeError: DecoderState[F] =
     readLine(line => ErrorResponse(line))
 
-  private val decodeBulk: DecoderState = readLineS(line => {
+  private val decodeBulk: DecoderState[F] = readLineS(line => {
     val numBytes = line.toInt
 
     if (numBytes < 0) {
-      State.pure(EmptyBulkResponse)
+      pureState(EmptyBulkResponse)
     } else {
       readBytes(numBytes)(bytes => {
         readBytes(2) {
           case Array(x, y) if x == '\r'.toByte && y == '\n'.toByte =>
-            State.pure(BulkResponse(bytes))
+            pureState(BulkResponse(bytes))
 
           case x =>
-            State.pure(Error(new RuntimeException(s"Got unexpected byte array: ${new String(x)}")))
+            pureState(Error(new RuntimeException(s"Got unexpected byte array: ${new String(x)}")))
         }
       })
     }
   })
 
-  private val decodeArrayStep: (RedisDecoderState, RedisDecoderValue) => DecoderState = {
+  private val decodeArrayStep: (RedisDecoderState, RedisDecoderValue) => DecoderState[F] = {
     case (RedisDecoderState(_, acc :: tail), RedisResponseValue(v)) =>
       if (acc.n == 1) {
-        State.modify[RedisDecoderState](_.copy(stack = tail)).
+        StateT.modify[F, RedisDecoderState](_.copy(stack = tail)).
           map(_ => RedisResponseValue(acc.lastly(acc.r :+ v)))
       } else {
-        State.modify[RedisDecoderState] { nextState =>
+        StateT.modify[F, RedisDecoderState] { nextState =>
           val na = acc.copy(n = acc.n - 1, r = acc.r :+ v)
           nextState.copy(stack = na :: tail)
         }.map(_ => Continue)
       }
 
     case (_, Continue) =>
-      State.pure(Continue)
+      StateT.pure(Continue)
 
-    case (_, i @ Incomplete(_, last)) =>
-      State.pure(i.copy(last = () => loop(last, unravelSingle)))
+    case (_, i: Incomplete[F]) =>
+      StateT.pure(i.copy(last = () => loop(i.last, unravelSingle)))
 
     case v =>
-      State.pure(Error(new IllegalStateException(v.toString)))
+      StateT.pure(Error(new IllegalStateException(v.toString)))
   }
 
-  private val unravelSingle: RedisDecoderValue => DecoderState = {
+  private lazy val unravelSingle: RedisDecoderValue => DecoderState[F] = {
     incomingValue => {
       val handleIncoming = for {
-        currState <- State.get[RedisDecoderState]
+        currState <- StateT.get[F, RedisDecoderState]
         newValue <- decodeArrayStep(currState, incomingValue)
       } yield newValue
 
       handleIncoming.flatMap {
-        case RedisResponseValue(resp) => State.pure(resp)
+        case RedisResponseValue(resp) => pureState(resp)
         case _ =>
           for {
             decodedValue <- decode
-            currState <- State.get[RedisDecoderState]
+            currState <- StateT.get[F, RedisDecoderState]
             result <- loop(() => decodeArrayStep(currState, decodedValue), unravelSingle)
           } yield result
       }
     }
   }
 
-  private def loop(f: () => DecoderState, next: RedisDecoderValue => DecoderState): DecoderState =
+  private def loop(f: () => DecoderState[F], next: RedisDecoderValue => DecoderState[F]): DecoderState[F] =
     f().flatMap {
-      case i @ Incomplete(_, redo) =>
-        State.pure(i.copy(last = () => loop(redo, next))): DecoderState
+      case i: Incomplete[F] =>
+        pureState(i.copy(last = () => loop(i.last, next)))
 
       case RedisResponseValue(v @ (_: MBulkResponse | NilMBulkResponse | EmptyMBulkResponse)) =>
-        State.pure(v)
+        pureState(v)
 
       case v =>
         next(v)
     }
 
-  private[this] val decodeArray: DecoderState = readLineS(line => {
+  private[this] val decodeArray: DecoderState[F] = readLineS(line => {
     val numResps = line.toInt
 
     if (numResps < 0) {
-      State.pure(NilMBulkResponse)
+      pureState(NilMBulkResponse)
     } else if (numResps == 0) {
-      State.pure(EmptyMBulkResponse)
+      pureState(EmptyMBulkResponse)
     } else {
-      RedisDecoder.state { st =>
+      state { st =>
         val newState = st.copy(stack = Accumulation(numResps, Nil, MBulkResponse.apply) +: st.stack)
-        newState -> Continue
+        pureF(newState -> Continue)
       }.flatMap(unravelSingle)
     }
   })
@@ -175,7 +189,7 @@ object RedisDecoder {
   private[this] val bulk: Byte = '$'
   private[this] val array: Byte = '*'
 
-  val decodeFromMessageType: Array[Byte] => DecoderState = (b: Array[Byte]) => {
+  val decodeFromMessageType: Array[Byte] => DecoderState[F] = (b: Array[Byte]) => {
     if (b.isEmpty) {
       StateT.pure(EmptyMBulkResponse)
     } else {
@@ -190,7 +204,7 @@ object RedisDecoder {
     }
   }
 
-  val decode: DecoderState = {
+  lazy val decode: DecoderState[F] = {
     readBytes(1)(decodeFromMessageType)
   }
 }

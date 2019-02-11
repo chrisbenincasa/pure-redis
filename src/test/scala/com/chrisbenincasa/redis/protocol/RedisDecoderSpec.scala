@@ -1,5 +1,6 @@
 package com.chrisbenincasa.redis.protocol
 
+import cats.Eval
 import com.chrisbenincasa.redis.protocol.RedisDecoderValue.RedisResponseValue
 import java.nio.ByteBuffer
 import org.scalacheck.{Arbitrary, Gen}
@@ -8,7 +9,7 @@ import org.scalatest.{Assertions, FunSuite}
 import scala.util.Random
 
 class RedisDecoderSpec extends FunSuite with GeneratorDrivenPropertyChecks with Assertions {
-  val decoder = RedisDecoder
+  val decoder = new RedisDecoder[Eval]
   val r = new Random()
 
   implicit val utf8String: Arbitrary[String] = {

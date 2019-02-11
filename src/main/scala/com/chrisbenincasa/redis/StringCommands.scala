@@ -1,43 +1,44 @@
 package com.chrisbenincasa.redis
 
-import cats.effect.IO
-import com.chrisbenincasa.redis.protocol.commands._
+import cats.effect.Effect
 import com.chrisbenincasa.redis.protocol._
+import com.chrisbenincasa.redis.protocol.commands._
 import java.nio.ByteBuffer
-import scala.concurrent.ExecutionContext
 
-private[redis] trait StringCommands { self: AbstractRedisClient =>
-  def get(key: ByteBuffer)(implicit E: ExecutionContext): IO[Option[ByteBuffer]] =
+private[redis] trait StringCommands[F[_]] { self: AbstractRedisClient[F] =>
+  def E: Effect[F]
+
+  def get(key: ByteBuffer): F[Option[ByteBuffer]] =
     safeFork(Get(key)) {
-      case BulkResponse(msg) => IO.pure(Some(ByteBuffer.wrap(msg)))
-      case EmptyBulkResponse => IO.pure(None)
+      case BulkResponse(msg) => E.pure(Some(ByteBuffer.wrap(msg)))
+      case EmptyBulkResponse => E.pure(None)
     }
 
-  def set(key: ByteBuffer, value: ByteBuffer)(implicit E: ExecutionContext): IO[Unit] =
+  def set(key: ByteBuffer, value: ByteBuffer): F[Unit] =
     safeFork(Set(key, value)) {
-      case StatusResponse(_) => IO.unit
+      case StatusResponse(_) => E.unit
     }
 
-  def incr(key: ByteBuffer)(implicit E: ExecutionContext): IO[Long] =
+  def incr(key: ByteBuffer): F[Long] =
     safeFork(Incr(key)) {
-      case IntegerResponse(n) => IO.pure(n)
+      case IntegerResponse(n) => E.pure(n)
     }
 
-  def decr(key: ByteBuffer)(implicit E: ExecutionContext): IO[Long] =
+  def decr(key: ByteBuffer): F[Long] =
     safeFork(Decr(key)) {
-      case IntegerResponse(n) => IO.pure(n)
+      case IntegerResponse(n) => E.pure(n)
     }
 
-  def mGet(keys: Seq[ByteBuffer])(implicit E: ExecutionContext): IO[Seq[Option[ByteBuffer]]] =
+  def mGet(keys: Seq[ByteBuffer]): F[Seq[Option[ByteBuffer]]] =
     safeFork(MGet(keys)) {
       case MBulkResponse(m) =>
-        IO.pure {
+        E.pure {
           m.map {
             case BulkResponse(s) => Some(ByteBuffer.wrap(s))
             case EmptyBulkResponse => None
             case _ => throw new IllegalStateException()
           }
         }
-      case EmptyBulkResponse => IO.pure(Seq.empty)
+      case EmptyBulkResponse => E.pure(Seq.empty)
     }
 }

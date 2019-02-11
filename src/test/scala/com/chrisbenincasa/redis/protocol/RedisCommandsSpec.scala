@@ -1,20 +1,20 @@
 package com.chrisbenincasa.redis.protocol
 
-import cats.effect.IO
+import cats.effect.{ContextShift, Effect, IO}
 import com.chrisbenincasa.redis.BaseRedisClient
 import com.chrisbenincasa.redis.protocol.ByteBufferImplicits._
 import com.chrisbenincasa.redis.protocol.commands.{Command, EncodedCommandString, Get}
 import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 import java.nio.channels.SocketChannel
-import java.util.concurrent.{ExecutorService, Executors}
+import java.util.concurrent.Executors
 import org.scalatest.FunSuite
-import scala.concurrent.Await
-import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration._
+import scala.concurrent.{Await, ExecutionContext}
 
 class RedisCommandsSpec extends FunSuite {
   private implicit val executor = Executors.newSingleThreadExecutor()
+  private implicit val ctx = IO.contextShift(ExecutionContext.fromExecutor(executor))
 
   test("GET") {
     Command.encode(Get("key")) match {
@@ -58,8 +58,8 @@ class RedisCommandsSpec extends FunSuite {
 class SocketRedisClient(
   addr: InetSocketAddress = new InetSocketAddress("localhost", 6379),
   readBufferSize: Int = 512
-)(implicit E: ExecutorService)
-  extends BaseRedisClient {
+)(implicit ctx: ContextShift[IO], eff: Effect[IO])
+  extends BaseRedisClient[IO] {
 
   private val channel = SocketChannel.open(addr)
 
