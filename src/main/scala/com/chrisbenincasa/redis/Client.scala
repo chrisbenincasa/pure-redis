@@ -39,7 +39,7 @@ abstract class AbstractRedisClient[F[_]: ConcurrentEffect](implicit CS: ContextS
         state.run(initial).map(_._2)
       }
       redisResponse <- decodingResult match {
-        case i: Incomplete[F] => E.suspend(readAndParse(Some(i)))
+        case i: Incomplete[F] => E.suspend(readAndParse(Some(i))) // TODO: Revisit stack safety
         case RedisResponseValue(rr) => E.pure(rr)
         case Error(err) => E.raiseError(err)
         case x => E.raiseError(new IllegalStateException(s"Illegal state reached: $x"))

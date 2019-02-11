@@ -1,8 +1,11 @@
 package com.chrisbenincasa.redis.protocol
 
+import cats.data.StateT
 import cats.effect.{ContextShift, Effect, IO}
 import com.chrisbenincasa.redis.BaseRedisClient
 import com.chrisbenincasa.redis.protocol.ByteBufferImplicits._
+import com.chrisbenincasa.redis.protocol.RedisDecoder.DecoderState
+import com.chrisbenincasa.redis.protocol.RedisDecoderValue.{Incomplete, RedisResponseValue, StringValue}
 import com.chrisbenincasa.redis.protocol.commands.{Command, EncodedCommandString, Get}
 import java.net.InetSocketAddress
 import java.nio.ByteBuffer
@@ -53,6 +56,31 @@ class RedisCommandsSpec extends FunSuite {
 
     println(all.map(_.map(byteBufferToString)))
   }
+
+  ignore("stack safe") {
+    // Client returns Incomplete 50000 times
+    val client = new SocketRedisClient() {
+      override protected val decoder: RedisDecoder[IO] = new RedisDecoder[IO] {
+        var i = 0
+        lazy val mkIncomplete: DecoderState[IO] = {
+          StateT.get[IO, RedisDecoderState].flatMap(s => {
+            i += 1
+            if (i > 50000) {
+              StateT.pure(RedisResponseValue(StatusResponse("OK")))
+            } else {
+              StateT.pure(Incomplete(s, () => mkIncomplete))
+            }
+          })
+        }
+
+        override lazy val decode: DecoderState[IO] = mkIncomplete
+      }
+
+      protected override def read(): IO[ByteBuffer] = IO.pure(ByteBuffer.wrap(Array[Byte](1)))
+    }
+
+    client.set("key", "1").unsafeRunSync()
+  }
 }
 
 class SocketRedisClient(
@@ -64,22 +92,23 @@ class SocketRedisClient(
   private val channel = SocketChannel.open(addr)
 
   override protected def send(command: Command): IO[Unit] = {
-    val encoded = Command.encode(command)
-    val wholeBuf = ByteBuffer.allocate(encoded.map(_.length).sum)
-    wholeBuf.clear()
-    encoded.foreach(wholeBuf.put)
-    wholeBuf.flip()
-
-    IO {
-      while (wholeBuf.hasRemaining) {
-        channel.write(wholeBuf)
+    for {
+      _ <- ctx.shift
+      encoded <- IO.pure(Command.encode(command))
+      wholeBuf <- IO.delay(ByteBuffer.allocate(encoded.map(_.length).sum))
+      _ = {
+        wholeBuf.clear()
+        encoded.foreach(wholeBuf.put)
+        wholeBuf.flip()
       }
-    }
+      result <- IO(while (wholeBuf.hasRemaining) { channel.write(wholeBuf) })
+    } yield result
   }
 
   override protected def read(): IO[ByteBuffer] = {
-    val readBuffer = ByteBuffer.allocate(readBufferSize)
     for {
+      _ <- ctx.shift
+      readBuffer <- IO.delay(ByteBuffer.allocate(readBufferSize))
       _ <- IO.pure(readBuffer.clear())
       _ <- IO(channel.read(readBuffer))
       _ <- IO.pure(readBuffer.flip())
